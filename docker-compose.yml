@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-satpractice}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-satpractice}
+      POSTGRES_DB: ${POSTGRES_DB:-satpractice}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-satpractice}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@satpractice.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-satpractice}:${POSTGRES_PASSWORD:-satpractice}@postgres:5432/${POSTGRES_DB:-satpractice}
+      PORT: 3001
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-in-production}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:3001/api/auth/google/callback}
+      CB_QUESTION_BANK_API: ${CB_QUESTION_BANK_API:-https://qbank-api.collegeboard.org/msreportingquestionbank-prod/questionbank/digital}
+      CB_DISCLOSED_API: ${CB_DISCLOSED_API:-https://saic.collegeboard.org/disclosed}
+      CB_ASSESSMENT_ID: ${CB_ASSESSMENT_ID:-99}
+      CB_SYNC_BATCH_SIZE: ${CB_SYNC_BATCH_SIZE:-25}
+      CB_SYNC_DELAY_MS: ${CB_SYNC_DELAY_MS:-150}
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_URL: ""
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

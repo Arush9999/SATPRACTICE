@@ -1,0 +1,524 @@
+const DIGITAL_PRACTICE_HOST = "https://digitalpractice-api.collegeboard.org";
+const API_BASE = `${DIGITAL_PRACTICE_HOST}/mspractice-studentquestionbank-prod`;
+const AUTH_HEADERS = {
+  authentication: "x-cb-catapult-authentication-token",
+  authorization: "x-cb-catapult-authorization-token"
+};
+
+const STORAGE_KEYS = {
+  auth: "satQbExporter.auth",
+  page: "satQbExporter.page",
+  detectedSection: "satQbExporter.detectedSection"
+};
+
+const SECTION_PROFILES = {
+  math: {
+    label: "Math",
+    fileSlug: "math",
+    liveSections: ["math"],
+    tests: ["math"],
+    domains: [
+      { code: "H", label: "Algebra" },
+      { code: "P", label: "Advanced Math" },
+      { code: "Q", label: "Problem-Solving and Data Analysis" },
+      { code: "S", label: "Geometry and Trigonometry" }
+    ]
+  },
+  rw: {
+    label: "Reading and Writing",
+    fileSlug: "rw",
+    liveSections: ["reading", "rw", "reading-writing", "reading_and_writing"],
+    tests: ["reading", "rw", "reading-writing", "reading_and_writing"],
+    domains: [
+      { code: "INI", label: "Information and Ideas" },
+      { code: "CAS", label: "Craft and Structure" },
+      { code: "EOI", label: "Expression of Ideas" },
+      { code: "SEC", label: "Standard English Conventions" }
+    ]
+  }
+};
+
+const DIFFICULTY_LABELS = {
+  E: "Easy",
+  M: "Medium",
+  H: "Hard"
+};
+
+const ANSWER_MODE_LABELS = {
+  "no-answers": "No Correct Answers or Explanations",
+  "with-answers": "With Correct Answers and Explanations",
+  "no-choices": "Without Answers or Headers"
+};
+
+const RW_ALIASES = new Set(["reading", "rw", "reading-writing", "reading_and_writing"]);
+
+const printJobs = new Map();
+const printWaiters = new Map();
+
+/* ── Auth header capture ── */
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  details => {
+    const headers = details.requestHeaders || [];
+    const found = getAuthFromHeaders(headers);
+
+    if (!found.authenticationToken || !found.authorizationToken) {
+      return;
+    }
+
+    chrome.storage.local.set({
+      [STORAGE_KEYS.auth]: {
+        ...found,
+        capturedAt: Date.now(),
+        capturedFrom: details.url
+      }
+    });
+  },
+  {
+    urls: [
+      `${DIGITAL_PRACTICE_HOST}/mspractice-studentquestionbank-prod/*`,
+      `${DIGITAL_PRACTICE_HOST}/mspractice-testresults-prod/*`
+    ],
+    types: ["xmlhttprequest"]
+  },
+  ["requestHeaders", "extraHeaders"]
+);
+
+/* ── Section auto-detection from API traffic ── */
+
+chrome.webRequest.onBeforeRequest.addListener(
+  details => {
+    if (details.method !== "POST") {
+      return;
+    }
+    try {
+      const raw = details.requestBody?.raw;
+      if (!raw?.[0]?.bytes) {
+        return;
+      }
+      const body = JSON.parse(new TextDecoder().decode(raw[0].bytes));
+      const apiValue = body.test || body.section;
+      if (!apiValue) {
+        return;
+      }
+      const key = RW_ALIASES.has(apiValue) ? "rw" : apiValue === "math" ? "math" : null;
+      if (key) {
+        chrome.storage.local.set({
+          [STORAGE_KEYS.detectedSection]: {
+            key,
+            apiValue,
+            detectedAt: Date.now()
+          }
+        });
+      }
+    } catch {
+      // Ignore non-JSON or parse errors
+    }
+  },
+  {
+    urls: [`${DIGITAL_PRACTICE_HOST}/mspractice-studentquestionbank-prod/*`],
+    types: ["xmlhttprequest"]
+  },
+  ["requestBody"]
+);
+
+/* ── Message handling ── */
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "getStatus") {
+    getStatus().then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === "getPracticeTestScores") {
+    getPracticeTestScores()
+      .then(sendResponse)
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "exportPracticeTestData") {
+    exportPracticeTestDataDirect(message.rosterEntryId, message.title)
+      .then(res => sendResponse({ ok: true, status: "Export complete", filename: res.filename, downloadId: res.downloadId, data: res.data }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "clearAuth") {
+    chrome.storage.local.remove(STORAGE_KEYS.auth).then(() => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.type === "pageSeen") {
+    chrome.storage.local.set({
+      [STORAGE_KEYS.page]: {
+        href: message.href,
+        title: message.title,
+        seenAt: message.seenAt || Date.now()
+      }
+    });
+    return false;
+  }
+
+  if (message?.type === "getPrintJob") {
+    const job = printJobs.get(message.jobId);
+    sendResponse({ ok: Boolean(job), job });
+    return false;
+  }
+
+  if (message?.type === "printReady") {
+    const waiter = printWaiters.get(message.jobId);
+    if (waiter && (!waiter.tabId || waiter.tabId === sender.tab?.id)) {
+      waiter.resolve();
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  return false;
+});
+
+/* ── Long-lived port for export jobs ── */
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== "sat-qb-export") {
+    return;
+  }
+
+  let disconnected = false;
+  port.onDisconnect.addListener(() => {
+    disconnected = true;
+  });
+
+  const post = payload => {
+    if (disconnected) {
+      return;
+    }
+    try {
+      port.postMessage(payload);
+    } catch {
+      disconnected = true;
+    }
+  };
+
+  port.onMessage.addListener(message => {
+    if (message?.type === "countQuestions") {
+      countQuestions(message.options || {}, post).catch(error => postError(post, error));
+      return;
+    }
+
+    if (message?.type === "exportSample") {
+      exportPdfs("sample", message.options || {}, post).catch(error => postError(post, error));
+      return;
+    }
+
+    if (message?.type === "exportAll") {
+      exportPdfs("all", message.options || {}, post).catch(error => postError(post, error));
+      return;
+    }
+
+    if (message?.type === "exportInteractiveTest") {
+      exportInteractiveTest(message.options || {}, post).catch(error => postError(post, error));
+      return;
+    }
+
+    if (message?.type === "exportPracticeTest") {
+      exportPracticeTest(message.options || {}, post).catch(error => postError(post, error));
+      return;
+    }
+  });
+});
+
+function postError(post, error) {
+  post({
+    type: "error",
+    message: error?.message || String(error)
+  });
+}
+
+function getAuthFromHeaders(headers) {
+  const found = {};
+
+  for (const header of headers) {
+    const name = String(header.name || "").toLowerCase();
+    if (name === AUTH_HEADERS.authentication) {
+      found.authenticationToken = header.value;
+    }
+    if (name === AUTH_HEADERS.authorization) {
+      found.authorizationToken = header.value;
+    }
+  }
+
+  return found;
+}
+
+async function getStatus() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.auth, STORAGE_KEYS.page, STORAGE_KEYS.detectedSection]);
+  const auth = stored[STORAGE_KEYS.auth] || null;
+  const page = stored[STORAGE_KEYS.page] || null;
+  const detected = stored[STORAGE_KEYS.detectedSection] || null;
+
+  return {
+    hasAuth: Boolean(auth?.authenticationToken && auth?.authorizationToken),
+    capturedAt: auth?.capturedAt || null,
+    capturedFrom: auth?.capturedFrom || null,
+    page,
+    sections: publicSectionProfiles(),
+    detectedSection: detected
+  };
+}
+
+function publicSectionProfiles() {
+  return Object.fromEntries(
+    Object.entries(SECTION_PROFILES).map(([key, profile]) => [
+      key,
+      {
+        label: profile.label,
+        domains: profile.domains
+      }
+    ])
+  );
+}
+
+async function countQuestions(options, post) {
+  const auth = await getAuthOrThrow();
+  const normalized = normalizeOptions(options);
+
+  post({
+    type: "progress",
+    value: 0.15,
+    message: "Counting matching questions"
+  });
+
+  const result = await selectQuestions(auth, normalized, post);
+
+  post({
+    type: "count",
+    value: 1,
+    count: result.selected.length,
+    section: result.profile.label,
+    metadataCount: result.metadata.length,
+    liveCount: result.liveIds.length,
+    message: `${result.selected.length} matching ${result.profile.label} questions`
+  });
+}
+
+async function exportPdfs(mode, options, post) {
+  const auth = await getAuthOrThrow();
+  const normalized = normalizeOptions(options);
+  const selectedResult = await selectQuestions(auth, normalized, post);
+  const selected = mode === "sample"
+    ? selectedResult.selected.slice(0, normalized.sampleSize)
+    : selectedResult.selected;
+
+  if (!selected.length) {
+    throw new Error("No questions matched those filters.");
+  }
+
+  post({
+    type: "progress",
+    phase: "details",
+    value: 0.18,
+    current: 0,
+    total: selected.length,
+    message: `Fetching details for ${selected.length} ${selectedResult.profile.label} questions`
+  });
+
+  const ids = selected.map(question => question.external_id);
+  const details = await fetchDetails(ids, 25, auth, progress => {
+    post({
+      type: "progress",
+      phase: "details",
+      value: 0.18 + (progress.done / progress.total) * 0.42,
+      current: progress.done,
+      total: progress.total,
+      message: `Fetched ${progress.done} of ${progress.total}`
+    });
+  });
+
+  const detailMap = new Map(details.map(detail => [detail.externalid || detail.external_id, detail]));
+  const rows = selected.map((metadata, index) => ({
+    absoluteIndex: mode === "sample" ? index + 1 : selectedResult.indexById.get(metadata.external_id),
+    metadata,
+    detail: detailMap.get(metadata.external_id) || {}
+  }));
+
+  const batches = chunk(rows, mode === "sample" ? rows.length : normalized.batchSize);
+  const pdfEntries = [];
+
+  let tabId = null;
+  let attached = false;
+
+  try {
+    const tab = await chrome.tabs.create({
+      url: chrome.runtime.getURL("print.html"),
+      active: false
+    });
+    tabId = tab.id;
+
+    await waitForTabLoad(tabId);
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attached = true;
+
+    for (let index = 0; index < batches.length; index += 1) {
+      const batch = batches[index];
+      const part = index + 1;
+      const totalParts = batches.length;
+      const filename = makePdfFileName(selectedResult.profile, normalized, mode, part, totalParts);
+
+      post({
+        type: "progress",
+        phase: "pdf",
+        value: 0.6 + (index / totalParts) * 0.35,
+        current: part,
+        total: totalParts,
+        message: `Printing PDF ${part} of ${totalParts}`
+      });
+
+      const printJob = makePrintJob({
+        profile: selectedResult.profile,
+        normalized,
+        mode,
+        part,
+        totalParts,
+        totalQuestions: selectedResult.selected.length,
+        rows: batch
+      });
+
+      const pdfBase64 = await renderPdfInTab(tabId, printJob);
+      pdfEntries.push({ name: filename, data: base64ToBytes(pdfBase64) });
+
+      post({ type: "pdfGenerated", filename, current: part, total: totalParts });
+    }
+  } finally {
+    if (attached && tabId != null) {
+      await chrome.debugger.detach({ tabId }).catch(() => {});
+    }
+    if (tabId != null) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+    }
+  }
+
+  // Bundle all PDFs into a single ZIP — one download, one save dialog
+  post({ type: "progress", value: 0.96, message: "Creating ZIP archive…" });
+  const zipBytes = createZip(pdfEntries);
+  const zipBase64 = bytesToBase64(zipBytes);
+  const zipFilename = makeZipFileName(selectedResult.profile, normalized, mode);
+
+  await chrome.downloads.download({
+    url: `data:application/zip;base64,${zipBase64}`,
+    filename: zipFilename,
+    conflictAction: "uniquify",
+    saveAs: true
+  });
+
+  post({
+    type: "done",
+    value: 1,
+    count: rows.length,
+    downloads: pdfEntries.map(e => ({ filename: e.name })),
+    zipFilename,
+    message: `Saved ${pdfEntries.length} PDF${pdfEntries.length === 1 ? "" : "s"} in ${zipFilename}`
+  });
+}
+
+async function exportInteractiveTest(options, post) {
+  const auth = await getAuthOrThrow();
+  const requestedSections = ["math", "rw"];
+  const allQuestions = [];
+  const sectionSummaries = [];
+  const warnings = [];
+
+  for (let sectionIndex = 0; sectionIndex < requestedSections.length; sectionIndex += 1) {
+    const section = requestedSections[sectionIndex];
+    const normalized = normalizeOptions({ ...options, section });
+    const profile = SECTION_PROFILES[section];
+    const progressBase = sectionIndex === 0 ? 0.04 : 0.5;
+
+    post({
+      type: "progress",
+      phase: "interactive-metadata",
+      value: progressBase,
+      message: `Loading ${profile.label} question list`
+    });
+
+    let selectedResult;
+    try {
+      selectedResult = await selectQuestions(auth, normalized, post, section);
+    } catch (error) {
+      warnings.push(`${profile.label}: ${error.message}`);
+      continue;
+    }
+
+    post({
+      type: "progress",
+      phase: "interactive-details",
+      value: progressBase + 0.08,
+      current: 0,
+      total: selectedResult.selected.length,
+      message: `Fetching ${selectedResult.selected.length} ${profile.label} question details`
+    });
+
+    const ids = selectedResult.selected.map(question => question.external_id);
+    const details = await fetchDetails(ids, 25, auth, progress => {
+      post({
+        type: "progress",
+        phase: "interactive-details",
+        value: progressBase + 0.08 + (progress.done / progress.total) * 0.34,
+        current: progress.done,
+        total: progress.total,
+        message: `Fetched ${progress.done} of ${progress.total} ${profile.label} questions`
+      });
+    });
+
+    const detailMap = new Map(details.map(detail => [detail.externalid || detail.external_id, detail]));
+    const rows = selectedResult.selected.map((metadata, index) => ({
+      absoluteIndex: selectedResult.indexById.get(metadata.external_id) || index + 1,
+      metadata,
+      detail: detailMap.get(metadata.external_id) || {}
+    }));
+
+    allQuestions.push(...rows.map(row => toInteractiveQuestion(row, profile, section, options.assessment)));
+    sectionSummaries.push({
+      subject: section,
+      label: profile.label,
+      selectedCount: rows.length,
+      metadataCount: selectedResult.metadata.length,
+      domains: profile.domains
+    });
+  }
+
+  if (!allQuestions.length) {
+    throw new Error(`No questions could be exported. ${warnings.join(" ")}`.trim());
+  }
+
+  post({
+    type: "progress",
+    phase: "interactive-save",
+    value: 0.92,
+    message: "Preparing interactive test file"
+  });
+
+  const exportFile = {
+    format: "sat-test",
+    formatVersion: 1,
+    assessmentId: options.assessment,
+    source: {
+      name: "SAT Question Bank Exporter",
+      extensionVersion: chrome.runtime.getManifest().version
+    },
+    exportedAt: new Date().toISOString(),
+    filters: {
+      difficulties: normalizeDifficulties(options.difficulties),
+      excludeActive: options.excludeActive === true
+    },
+    sections: sectionSummaries,
+    warnings,
+    counts: countInteractiveQuestions(allQuestions),
+    questions: allQuestions
+  };
+
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(exportFile));
+  const filename = makeInteractiveFileName(exportFile)
