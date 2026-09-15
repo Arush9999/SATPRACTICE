@@ -27,7 +27,7 @@ export default function Dashboard() {
         <div className="rounded-2xl border border-earth/30 bg-earth/10 p-5 text-sm leading-6 text-earth">
           <p className="font-semibold">Question bank not synced yet</p>
           <p className="mt-1">
-            Run <code className="rounded bg-earth/15 px-1">npm run sync-questions</code> in the
+            Run <code className="rounded bg-earth/15 px-1">python scripts/sync_questions.py</code> in the
             backend folder to pull official questions from the College Board SAT Suite Question Bank.
             {syncStatus.synced_count > 0 && ` Currently synced: ${syncStatus.synced_count} questions.`}
           </p>

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import ThemeToggle from '../components/ThemeToggle';
 import { api, googleLoginUrl } from '../lib/api';
 
 export default function Signup() {
@@ -83,12 +82,9 @@ export default function Signup() {
 export function AuthShell({ title, subtitle, children, footer }) {
   return (
     <div className="mx-auto flex min-h-[70vh] max-w-md flex-col justify-center py-8">
-      <div className="mb-8 flex items-center justify-between gap-4">
-        <Link to="/" className="font-display text-2xl font-bold text-leaf">
-          SAT Practice
-        </Link>
-        <ThemeToggle />
-      </div>
+      <Link to="/" className="mb-8 font-display text-2xl font-bold text-leaf">
+        SAT Practice
+      </Link>
       <div className="rounded-3xl border border-sage/60 bg-surface p-8 shadow-sm backdrop-blur-sm">
         <h1 className="font-display text-3xl font-bold text-ink">{title}</h1>
         <p className="mt-2 text-sm leading-6 text-mist">{subtitle}</p>

@@ -5,29 +5,6 @@
   --font-sans: "Sora", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Fraunces", Georgia, serif;
 
-  --color-ink: #0d1b0a;
-  --color-forest: #1a2f16;
-  --color-shadow: #2d3e24;
-  --color-earth: #4e4a36;
-  --color-leaf: #4b7d2f;
-  --color-moss: #6b8e23;
-  --color-fern: #3a5f28;
-  --color-lime: #a3c139;
-  --color-chartreuse: #c0d725;
-  --color-canopy: #8da437;
-  --color-sage: #b0c4b1;
-  --color-haze: #8da399;
-  --color-mist: #789286;
-  --color-grove: #e8efe6;
-  --color-mist-soft: #d5e0d4;
-  --color-surface: color-mix(in srgb, white 82%, transparent);
-  --color-surface-solid: #ffffff;
-  --color-header: color-mix(in srgb, white 82%, transparent);
-}
-
-.dark {
-  color-scheme: dark;
-
   --color-ink: #e8efe6;
   --color-forest: #162614;
   --color-shadow: #b8c9b4;
@@ -43,14 +20,17 @@
   --color-mist: #a8bdb2;
   --color-grove: #0d1b0a;
   --color-mist-soft: #162614;
-  --color-surface: color-mix(in srgb, var(--color-forest) 90%, transparent);
+  --color-surface: color-mix(in srgb, #1a2f16 90%, transparent);
   --color-surface-solid: #1a2f16;
-  --color-header: color-mix(in srgb, var(--color-forest) 94%, transparent);
+  --color-header: color-mix(in srgb, #1a2f16 94%, transparent);
+}
+
+html {
+  color-scheme: dark;
 }
 
 body {
   @apply bg-grove text-ink font-sans antialiased;
-  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 .font-display {
@@ -59,9 +39,6 @@ body {
 
 .katex-content .katex {
   font-size: 1.05em;
-}
-
-.dark .katex {
   color: var(--color-ink);
 }
 
@@ -93,4 +70,23 @@ body {
 
 .fade-up-delay-2 {
   animation: fade-up 0.9s ease-out 0.3s both;
+}
+
+.home-hero {
+  background-color: #0d1b0a;
+  color: #a8bdb2;
+}
+
+.home-gradient {
+  background-image:
+    radial-gradient(ellipse at 20% 10%, #4b7d2f 0%, transparent 45%),
+    radial-gradient(ellipse at 90% 20%, #a3c139 0%, transparent 35%),
+    radial-gradient(ellipse at 50% 90%, #1a2f16 0%, #0d1b0a 70%);
+}
+
+.home-stripes {
+  background-image:
+    linear-gradient(135deg, transparent 40%, #c0d725 40.5%, transparent 41%),
+    linear-gradient(135deg, transparent 62%, #6b8e23 62.5%, transparent 63%);
+  background-size: 100% 100%;
 }
